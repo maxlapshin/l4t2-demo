@@ -7,4 +7,5 @@
 * cd 17_transcoder
 * make
 * ./transcoder H264 sample.h264 H264 out.h264 -ew 1920 -eh 1080 --input-nalu
+* ./transcoder H264 sample.h264 H264 out_cuda.h264 -ew 1920 -eh 1080 --input-nalu --cuda
 

@@ -12,6 +12,8 @@
 #include <poll.h>
 #include <functional>
 #include <nvbuf_utils.h>
+#include <cuda.h>
+#include <cudaEGL.h>
 
 #include "video_decode.h"
 #include "video_encode.h"
@@ -386,7 +388,7 @@ setup_output_dmabuf(enc_context_t *ctx, uint32_t num_buffers )
         cParams.width = ctx->width;
         cParams.height = ctx->height;
         cParams.layout = NvBufferLayout_Pitch;
-        if (ctx->enableLossless && ctx->encoder_pixfmt == V4L2_PIX_FMT_H264)
+        /*if (ctx->enableLossless && ctx->encoder_pixfmt == V4L2_PIX_FMT_H264)
         {
             cParams.colorFormat = NvBufferColorFormat_YUV444;
         }
@@ -398,7 +400,8 @@ setup_output_dmabuf(enc_context_t *ctx, uint32_t num_buffers )
         {
             cParams.colorFormat = ctx->enable_extended_colorformat ?
                  NvBufferColorFormat_YUV420_ER : NvBufferColorFormat_YUV420;
-        }
+        }*/
+        cParams.colorFormat = NvBufferColorFormat_NV12;
         cParams.nvbuf_tag = NvBufferTag_VIDEO_ENC;
         cParams.payloadType = NvBufferPayload_SurfArray;
         ret = NvBufferCreateEx(&fd, &cParams);
@@ -408,7 +411,6 @@ setup_output_dmabuf(enc_context_t *ctx, uint32_t num_buffers )
             return ret;
         }
         ctx->output_plane_fd[i]=fd;
-        cout << "NvBufferCreateEx enc " << i << " " << fd << endl;
     }
     return ret;
 }
@@ -808,6 +810,78 @@ restart:
     }
 }
 
+static CUresult
+cuda_copy(int src_fd, int dst_fd, CUstream stream) {
+  CUresult ret;
+
+  EGLImageKHR src_image = NvEGLImageFromFd(NULL, src_fd);
+  if (src_image == NULL)
+    return CUDA_ERROR_ASSERT;
+  EGLImageKHR dst_image = NvEGLImageFromFd(NULL, dst_fd);
+  if (dst_image == NULL)
+    return CUDA_ERROR_ASSERT;  
+
+  CUgraphicsResource src_res, dst_res;  
+  CUeglFrame src_frame, dst_frame;
+
+  ret = cuGraphicsEGLRegisterImage(&src_res, src_image, CU_GRAPHICS_REGISTER_FLAGS_READ_ONLY);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+
+  ret = cuGraphicsEGLRegisterImage(&dst_res, dst_image, CU_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+  
+  ret = cuGraphicsResourceGetMappedEglFrame(&src_frame, src_res, 0, 0);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+  
+  ret = cuGraphicsResourceGetMappedEglFrame(&dst_frame, dst_res, 0, 0);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+
+  CUDA_MEMCPY2D cpy = {0};
+  cpy.srcDevice = (CUdeviceptr)src_frame.frame.pPitch[0];
+  cpy.srcPitch = src_frame.pitch;
+  cpy.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+  cpy.dstDevice = (CUdeviceptr)dst_frame.frame.pPitch[0];
+  cpy.dstPitch = dst_frame.pitch;
+  cpy.dstMemoryType = CU_MEMORYTYPE_DEVICE;
+  cpy.WidthInBytes = src_frame.width;
+  cpy.Height = src_frame.height; 
+
+  ret = cuMemcpy2DAsync(&cpy, stream);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+  
+  // NV12
+  cpy.srcDevice = (CUdeviceptr)src_frame.frame.pPitch[1];
+  cpy.dstDevice = (CUdeviceptr)dst_frame.frame.pPitch[1];
+  cpy.Height = src_frame.height / 2;   
+  ret = cuMemcpy2DAsync(&cpy, stream);
+  if (ret != CUDA_SUCCESS)
+      return ret;
+
+  ret = cuStreamSynchronize(stream);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+
+  ret = cuCtxSynchronize();
+  if (ret != CUDA_SUCCESS)
+    return ret;
+
+  ret = cuGraphicsUnregisterResource(src_res);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+
+  ret = cuGraphicsUnregisterResource(dst_res);
+  if (ret != CUDA_SUCCESS)
+    return ret;
+
+  NvDestroyEGLImage(NULL, src_image);
+  NvDestroyEGLImage(NULL, dst_image);
+}
+
 
 
 
@@ -844,28 +918,46 @@ static int encoder_proc_blocking(tc_context_t *tc, bool eos)
         }
 
         auto v4l2_dec_buf = tc->buffers.front();
-
-        NvBufferRect src_rect, dest_rect;
-        src_rect.top = 0;
-        src_rect.left = 0;
-        src_rect.width = tc->dec_ctx.display_width;
-        src_rect.height = tc->dec_ctx.display_height;
-        dest_rect.top = 0;
-        dest_rect.left = 0;
-        dest_rect.width = ctx->width;
-        dest_rect.height = ctx->height;
-
-        NvBufferTransformParams transform_params;
-        memset(&transform_params,0,sizeof(transform_params));
-        /* Indicates which of the transform parameters are valid */
-        transform_params.transform_flag = NVBUFFER_TRANSFORM_FILTER;
-        transform_params.transform_flip = NvBufferTransform_None;
-        transform_params.transform_filter = NvBufferTransform_Filter_Smart;
-        transform_params.src_rect = src_rect;
-        transform_params.dst_rect = dest_rect;
-
         int dec_fd = tc->dec_ctx.dmabuff_fd[v4l2_dec_buf.index];
-        ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[v4l2_buf.index], &transform_params);
+
+        if (ctx->use_cuda) {
+            CUresult cu_ret = cuda_copy(dec_fd, ctx->output_plane_fd[v4l2_buf.index], ctx->cu_stream);
+            if (cu_ret != CUDA_SUCCESS)
+            {
+                cerr << "Error while cuda copy" << endl;
+                abort(ctx);
+                goto cleanup;
+            }
+        } else {
+            NvBufferRect src_rect, dest_rect;
+            src_rect.top = 0;
+            src_rect.left = 0;
+            src_rect.width = tc->dec_ctx.display_width;
+            src_rect.height = tc->dec_ctx.display_height;
+            dest_rect.top = 0;
+            dest_rect.left = 0;
+            dest_rect.width = ctx->width;
+            dest_rect.height = ctx->height;
+
+            NvBufferTransformParams transform_params;
+            memset(&transform_params,0,sizeof(transform_params));
+            /* Indicates which of the transform parameters are valid */
+            transform_params.transform_flag = NVBUFFER_TRANSFORM_FILTER;
+            transform_params.transform_flip = NvBufferTransform_None;
+            transform_params.transform_filter = NvBufferTransform_Filter_Smart;
+            transform_params.src_rect = src_rect;
+            transform_params.dst_rect = dest_rect;
+            ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[v4l2_buf.index], &transform_params);
+
+            if (ret != 0) {
+                cerr << "Error transform" << endl;
+                abort(ctx);
+                goto cleanup;
+            }
+
+        }
+
+
 
         //cout << "NvBufferTransform1 " << dec_fd << " " << buffer->planes[0].fd << " " << ret << endl;
 
@@ -1080,7 +1172,7 @@ encode_proc(void *arg)
             break;
         case V4L2_MPEG_VIDEO_H265_PROFILE_MAIN:
         default:
-            ctx->raw_pixfmt = V4L2_PIX_FMT_YUV420M;
+            ctx->raw_pixfmt = V4L2_PIX_FMT_NV12M;
     }
     if (ctx->enableLossless && ctx->encoder_pixfmt == V4L2_PIX_FMT_H264)
     {
@@ -1284,6 +1376,23 @@ encode_proc(void *arg)
         TEST_ERROR(ret < 0, "Could not enable external RC", cleanup);
     }
 
+    if (ctx->use_cuda) {
+        CUresult cu_ret;
+
+        cu_ret = cuInit(0);
+        TEST_ERROR(cu_ret != CUDA_SUCCESS, "cuInit", cleanup);
+
+        cu_ret = cuDeviceGet(&ctx->cu_dev, 0);
+        TEST_ERROR(cu_ret != CUDA_SUCCESS, "cuDeviceGet", cleanup);
+
+        cu_ret = cuCtxCreate(&ctx->cu_ctx, CU_CTX_SCHED_AUTO, ctx->cu_dev);
+        TEST_ERROR(cu_ret != CUDA_SUCCESS, "cuCtxCreate", cleanup);
+
+        cu_ret = cuStreamCreate(&ctx->cu_stream, CU_STREAM_NON_BLOCKING);
+        TEST_ERROR(cu_ret != CUDA_SUCCESS, "cuStreamCreate", cleanup);
+    }
+
+
     // Query, Export and Map the output plane buffers so that we can read
     // raw data into the buffers
     
@@ -1364,29 +1473,42 @@ encode_proc(void *arg)
 
 
         auto v4l2_dec_buf = tc->buffers.front();
-
-        NvBufferRect src_rect, dest_rect;
-        src_rect.top = 0;
-        src_rect.left = 0;
-        src_rect.width = tc->dec_ctx.display_width;
-        src_rect.height = tc->dec_ctx.display_height;
-        dest_rect.top = 0;
-        dest_rect.left = 0;
-        dest_rect.width = ctx->width;
-        dest_rect.height = ctx->height;
-
-        NvBufferTransformParams transform_params;
-        memset(&transform_params,0,sizeof(transform_params));
-        /* Indicates which of the transform parameters are valid */
-        transform_params.transform_flag = NVBUFFER_TRANSFORM_FILTER;
-        transform_params.transform_flip = NvBufferTransform_None;
-        transform_params.transform_filter = NvBufferTransform_Filter_Smart;
-        transform_params.src_rect = src_rect;
-        transform_params.dst_rect = dest_rect;
-
         int dec_fd = tc->dec_ctx.dmabuff_fd[v4l2_dec_buf.index];
-        ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[i], &transform_params);
-        //cout << "NvBufferTransform " << dec_fd << " " << ctx->output_plane_fd[i] << " " << ret << endl;
+
+        if (ctx->use_cuda) {
+            CUresult cu_ret = cuda_copy(dec_fd, ctx->output_plane_fd[i], ctx->cu_stream);
+            if (cu_ret != CUDA_SUCCESS) {
+              cerr << "Error while cuda copy" << endl;
+              abort(ctx);
+              goto cleanup;
+            }
+        } else {
+            NvBufferRect src_rect, dest_rect;
+            src_rect.top = 0;
+            src_rect.left = 0;
+            src_rect.width = tc->dec_ctx.display_width;
+            src_rect.height = tc->dec_ctx.display_height;
+            dest_rect.top = 0;
+            dest_rect.left = 0;
+            dest_rect.width = ctx->width;
+            dest_rect.height = ctx->height;
+
+            NvBufferTransformParams transform_params;
+            memset(&transform_params,0,sizeof(transform_params));
+            /* Indicates which of the transform parameters are valid */
+            transform_params.transform_flag = NVBUFFER_TRANSFORM_FILTER;
+            transform_params.transform_flip = NvBufferTransform_None;
+            transform_params.transform_filter = NvBufferTransform_Filter_Smart;
+            transform_params.src_rect = src_rect;
+            transform_params.dst_rect = dest_rect;
+            
+            ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[i], &transform_params);
+            if (ret != 0) {
+              cerr << "Error transform" << endl;
+              abort(ctx);
+              goto cleanup;
+            }
+        }
 
         tc->buffers.pop_front();
         tc->release_buffers.push_back(v4l2_dec_buf);
@@ -1867,12 +1989,11 @@ query_and_set_capture(dec_context_t * ctx)
         {
             cParams.width = crop.c.width;
             cParams.height = crop.c.height;
-            cParams.layout = NvBufferLayout_BlockLinear;
+            cParams.layout = NvBufferLayout_Pitch;
             cParams.payloadType = NvBufferPayload_SurfArray;
             cParams.nvbuf_tag = NvBufferTag_VIDEO_DEC;
             ret = NvBufferCreateEx(&ctx->dmabuff_fd[index], &cParams);            
             TEST_ERROR(ret < 0, "Failed to create buffers", error);
-            cout << "NvBufferCreateEx " << index << " " << cParams.colorFormat << endl;
         }
         ret = dec->capture_plane.reqbufs(V4L2_MEMORY_DMABUF,ctx->numCapBuffers);
             TEST_ERROR(ret, "Error in request buffers on capture plane", error);
@@ -2011,7 +2132,6 @@ dec_capture_loop_fcn(void *arg)
 
             v4l2_buf2.m.planes[0].m.fd = ctx->dmabuff_fd[v4l2_buf.index];
             
-            cout << "return encode frame " << v4l2_buf.index << " " << v4l2_buf.m.planes[0].m.fd << endl;
 
             if (dec->capture_plane.qBuffer(v4l2_buf2, NULL) < 0)
             {

@@ -105,8 +105,9 @@ print_help(void)
             "ENCODER OPTIONS:\n"
             "\t-h,--help             Prints this text\n"
             "\t--dbg-level <level>   Sets the debug level [Values 0-3]\n\n"
-            "\r-ew <width>            Width encoded picture"
-            "\r-eh <height>            Width encoded picture"
+            "\r-cuda                 Use cuda for transform"            
+            "\r-ew <width>           Width encoded picture"
+            "\r-eh <height>          Width encoded picture"
             "\t-br <bitrate>         Bitrate [Default = 4000000]\n"
             "\t-pbr <peak_bitrate>   Peak bitrate [Default = 1.2*bitrate]\n\n"
             "NOTE: Peak bitrate takes effect in VBR more; must be >= bitrate\n\n"
@@ -794,6 +795,11 @@ enc_parse_csv_args(enc_context_t * ctx, int argc, char *argv[])
             CHECK_OPTION_VALUE(argp);
             ctx->height = atoi(*argp);
             CSV_PARSE_CHECK_ERROR(ctx->width == 0, "Input width should be > 0");
+        }
+        else if (!strcmp(arg, "--cuda")) 
+        {
+            ctx->use_cuda = true;
+            cout << "Use cuda for tranform" << endl;
         }
         else
         {

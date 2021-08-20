@@ -31,6 +31,7 @@
 #include <sstream>
 #include <stdint.h>
 #include <semaphore.h>
+#include <cuda.h>
 
 #define CRC32_POLYNOMIAL  0xEDB88320L
 
@@ -101,6 +102,7 @@ typedef struct
     bool enable_extended_colorformat;
     bool insert_aud;
     bool alliframes;
+    bool use_cuda;
     //enum v4l2_memory output_memory_type;
 
     bool report_metadata;
@@ -148,6 +150,10 @@ typedef struct
     sem_t encoderthread_sema; // Encoder thread waits on this to be signalled to continue q/dq loop
     pthread_t   enc_pollthread; // Polling thread, created if running in non-blocking mode.
     pthread_t enc_capture_loop; // Encoder capture thread
+
+    CUdevice cu_dev;
+    CUcontext cu_ctx;
+    CUstream cu_stream;
 } enc_context_t;
 
 int enc_parse_csv_args(enc_context_t * ctx, int argc, char *argv[]);
