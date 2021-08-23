@@ -947,7 +947,18 @@ static int encoder_proc_blocking(tc_context_t *tc, bool eos)
             transform_params.transform_filter = NvBufferTransform_Filter_Smart;
             transform_params.src_rect = src_rect;
             transform_params.dst_rect = dest_rect;
-            ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[v4l2_buf.index], &transform_params);
+            if (ctx->use_transform_async) {
+                NvBufferSyncObj obj;
+                memset(&obj, 0, sizeof(NvBufferSyncObj));
+                obj.use_outsyncobj = 1;
+                ret = NvBufferTransformAsync(dec_fd, ctx->output_plane_fd[v4l2_buf.index], &transform_params, &obj);
+                if (ret != 0) {
+                    ret = NvBufferSyncObjWait(&obj.outsyncobj, 0xffff);
+                }
+            } else {
+                ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[v4l2_buf.index], &transform_params);
+            }
+            
 
             if (ret != 0) {
                 cerr << "Error transform" << endl;
@@ -1501,8 +1512,19 @@ encode_proc(void *arg)
             transform_params.transform_filter = NvBufferTransform_Filter_Smart;
             transform_params.src_rect = src_rect;
             transform_params.dst_rect = dest_rect;
-            
-            ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[i], &transform_params);
+
+            if (ctx->use_transform_async) {
+                NvBufferSyncObj obj;
+                memset(&obj, 0, sizeof(NvBufferSyncObj));
+                obj.use_outsyncobj = 1;
+                ret = NvBufferTransformAsync(dec_fd, ctx->output_plane_fd[v4l2_buf.index], &transform_params, &obj);
+                if (ret != 0) {
+                    ret = NvBufferSyncObjWait(&obj.outsyncobj, 0);
+                }
+            } else {
+                ret = NvBufferTransform(dec_fd, ctx->output_plane_fd[i], &transform_params);
+            }
+
             if (ret != 0) {
               cerr << "Error transform" << endl;
               abort(ctx);
@@ -2170,7 +2192,6 @@ static bool decoder_proc_blocking(dec_context_t *ctx, bool eos, uint32_t current
         memset(planes, 0, sizeof(planes));
 
         v4l2_buf.m.planes = planes;
-        usleep(40000);
 
         if(allow_DQ)
         {
@@ -2204,6 +2225,11 @@ static bool decoder_proc_blocking(dec_context_t *ctx, bool eos, uint32_t current
                 read_decoder_input_chunk(ctx->in_file[current_file], buffer);
             }
         }
+
+        if (ctx->live) {
+            usleep(40000);
+        }
+
         v4l2_buf.m.planes[0].bytesused = buffer->planes[0].bytesused;
 
         if (ctx->input_nalu && ctx->copy_timestamp && ctx->flag_copyts)

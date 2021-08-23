@@ -105,7 +105,8 @@ print_help(void)
             "ENCODER OPTIONS:\n"
             "\t-h,--help             Prints this text\n"
             "\t--dbg-level <level>   Sets the debug level [Values 0-3]\n\n"
-            "\r-cuda                 Use cuda for transform"            
+            "\r--cuda                Use cuda for transform"
+            "\r--transform_async     Use NvBufferTransformAsync for transform"
             "\r-ew <width>           Width encoded picture"
             "\r-eh <height>          Width encoded picture"
             "\t-br <bitrate>         Bitrate [Default = 4000000]\n"
@@ -800,6 +801,11 @@ enc_parse_csv_args(enc_context_t * ctx, int argc, char *argv[])
         {
             ctx->use_cuda = true;
             cout << "Use cuda for tranform" << endl;
+        }
+        else if (!strcmp(arg, "--transform_async")) 
+        {
+            ctx->use_transform_async = true;
+            cout << "Use nvBufferTransformAsync for tranform" << endl;
         }
         else
         {

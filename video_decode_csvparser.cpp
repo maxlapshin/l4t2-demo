@@ -143,6 +143,7 @@ print_help(void)
             "\t--blocking-mode <val> Set blocking mode, 0 is non-blocking, 1 for blocking (Default) \n\n"
             "\t--input-metadata      Enable encoder input metadata\n"
             "\t--copy-timestamp <st> Enable copy timestamp with start timestamp(st) in seconds\n"
+            "\t--live                Enable live delay"
             "\t--mvdump              Dump encoded motion vectors\n\n"
             "\t--eroi                Enable ROI [Default = disabled]\n\n"
             "\t-roi <roi_file_path>  Specify roi param file\n\n"
@@ -410,6 +411,10 @@ dec_parse_csv_args(dec_context_t * ctx, int argc, char *argv[])
             argp++;
             CHECK_OPTION_VALUE(argp);
             ctx->loop_count = atoi(*argp);
+        }
+        else if (!strcmp(arg, "--live"))
+        {
+            ctx->live = true;
         }
         /*else if (!strcmp(arg, "-queue"))
         {

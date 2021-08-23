@@ -76,6 +76,7 @@ typedef struct
     float dec_fps;
     uint64_t timestamp;
     uint64_t timestampincr;
+    bool live;
 
     bool stats;
 

@@ -103,6 +103,7 @@ typedef struct
     bool insert_aud;
     bool alliframes;
     bool use_cuda;
+    bool use_transform_async;
     //enum v4l2_memory output_memory_type;
 
     bool report_metadata;
