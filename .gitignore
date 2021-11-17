@@ -1,2 +1,3 @@
 *.o
 multivideo_transcode
+video_decode
