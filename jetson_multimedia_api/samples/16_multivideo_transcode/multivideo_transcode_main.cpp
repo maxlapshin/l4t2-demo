@@ -834,11 +834,12 @@ buffer_refil(void *arg)
     context_t *ctx = (context_t *) arg;
     NvVideoDecoder *dec = ctx->dec;
     NvVideoEncoder *enc = ctx->enc;
+    bool sent_eos = false;
 
     /* Set thread name for decoder Capture Plane thread. */
     pthread_setname_np(ctx->buffer_refill, "BufferRefill");
 
-    while(!ctx->stop_refill)
+    while(!ctx->stop_refill || !sent_eos)
     {
         struct v4l2_buffer v4l2_buf;
         struct v4l2_plane planes[MAX_PLANES];
@@ -857,19 +858,46 @@ buffer_refil(void *arg)
             break;
         }
 
-        if (ctx->dec_capture_plane_mem_type == V4L2_MEMORY_DMABUF)
-        {
-            buffer->planes[0].fd = ctx->dmabuff_fd[v4l2_buf.index];
-            v4l2_buf.m.planes[0].m.fd = ctx->dmabuff_fd[v4l2_buf.index];
-        }
+        if (!ctx->stop_refill) {
+            if (ctx->dec_capture_plane_mem_type == V4L2_MEMORY_DMABUF)
+            {
+                buffer->planes[0].fd = ctx->dmabuff_fd[v4l2_buf.index];
+                v4l2_buf.m.planes[0].m.fd = ctx->dmabuff_fd[v4l2_buf.index];
+            }
 
-        if (dec->capture_plane.qBuffer(v4l2_buf, NULL) < 0)
-        {
-            abort(ctx);
-            cerr <<
-                "Error while queueing buffer at decoder capture plane"
-                << endl;
-            break;
+            if (dec->capture_plane.qBuffer(v4l2_buf, NULL) < 0)
+            {
+                abort(ctx);
+                cerr <<
+                    "Error while queueing buffer at decoder capture plane"
+                    << endl;
+                break;
+            }
+        } else {
+            /* Send size 0 buffer to encoder as EoS */
+            buffer = enc->output_plane.getNthBuffer(v4l2_buf.index);
+            v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+
+            if (ctx->enc_output_memory_type == V4L2_MEMORY_DMABUF)
+            {
+                for (uint32_t i = 0 ; i < buffer->n_planes ; i++)
+                {
+                    buffer->planes[i].fd = ctx->dmabuff_fd[v4l2_buf.index];
+                    v4l2_buf.m.planes[i].m.fd = buffer->planes[i].fd;
+                    buffer->planes[i].bytesused = 0;
+                    v4l2_buf.m.planes[i].bytesused = 0;
+                }
+            }
+
+            /* Enqueue a size 0 buffer in encoder */
+            if (ctx->enc->output_plane.qBuffer(v4l2_buf, NULL) < 0)
+            {
+                abort(ctx);
+                cerr <<
+                    "Error while queueing buffer at encoder output plane"
+                    << endl;
+            }
+            sent_eos = true;
         }
     }
 
@@ -1506,29 +1534,6 @@ dec_capture_loop_fcn(void *arg)
             }
 
         }
-    }
-
-    buffer = enc->output_plane.getNthBuffer(v4l2_buf.index);
-    v4l2_buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-
-    if (ctx->enc_output_memory_type == V4L2_MEMORY_DMABUF)
-    {
-        for (uint32_t i = 0 ; i < buffer->n_planes ; i++)
-        {
-            buffer->planes[i].fd = ctx->dmabuff_fd[v4l2_buf.index];
-            v4l2_buf.m.planes[i].m.fd = buffer->planes[i].fd;
-            buffer->planes[i].bytesused = 0;
-            v4l2_buf.m.planes[i].bytesused = 0;
-        }
-    }
-
-    /* Enqueue a size 0 buffer in encoder */
-    if (ctx->enc->output_plane.qBuffer(v4l2_buf, NULL) < 0)
-    {
-        abort(ctx);
-        cerr <<
-            "Error while queueing buffer at decoder capture plane"
-            << endl;
     }
 
     ctx->stop_refill=1;

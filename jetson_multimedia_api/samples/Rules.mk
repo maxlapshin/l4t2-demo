@@ -89,7 +89,7 @@ LDFLAGS += \
 endif
 
 # All common header files
-CPPFLAGS += -std=c++11 \
+CPPFLAGS += -std=c++11 -O0 -g -ggdb \
 	-I"$(TOP_DIR)/include" \
 	-I"$(TOP_DIR)/include/libjpeg-8b" \
 	-I"$(ALGO_CUDA_DIR)" \
