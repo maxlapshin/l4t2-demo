@@ -1024,7 +1024,7 @@ dec_capture_loop_fcn(void *arg)
         query_and_set_capture(ctx);
 
     /* Exit on error or EOS which is signalled in main() */
-    while (!(ctx->got_error || dec->isInError() || ctx->got_eos))
+    while (!(ctx->got_error || dec->isInError()))
     {
         NvBuffer *dec_buffer;
 
@@ -1038,6 +1038,9 @@ dec_capture_loop_fcn(void *arg)
                 case V4L2_EVENT_RESOLUTION_CHANGE:
                     query_and_set_capture(ctx);
                     continue;
+                case V4L2_EVENT_EOS:
+                    cout << "Got EoS event at capture plane" << endl;
+                    goto handle_eos;
             }
         }
 
@@ -1209,6 +1212,7 @@ dec_capture_loop_fcn(void *arg)
             }
         }
     }
+handle_eos:
 #ifndef USE_NVBUF_TRANSFORM_API
     /* Send EOS to converter */
     if (ctx->conv)
@@ -1826,6 +1830,11 @@ decode_proc(context_t& ctx, int argc, char *argv[])
     ret = ctx.dec->subscribeEvent(V4L2_EVENT_RESOLUTION_CHANGE, 0, 0);
     TEST_ERROR(ret < 0, "Could not subscribe to V4L2_EVENT_RESOLUTION_CHANGE",
                cleanup);
+    /* Subscribe to EOS event.
+       Refer ioctl VIDIOC_SUBSCRIBE_EVENT */
+    ret = ctx.dec->subscribeEvent(V4L2_EVENT_EOS, 0, 0);
+    TEST_ERROR(ret < 0, "Could not subscribe to V4L2_EVENT_EOS",cleanup);
+
 
     /* Set format on the output plane.
        Refer ioctl VIDIOC_S_FMT */
@@ -2076,6 +2085,11 @@ decode_proc(context_t& ctx, int argc, char *argv[])
                 abort(&ctx);
                 break;
             }
+            if (v4l2_buf.m.planes[0].bytesused == 0)
+            {
+                cout << "Got EoS at output plane"<< endl;
+                break;
+            }
 
             if ((v4l2_buf.flags & V4L2_BUF_FLAG_ERROR) && ctx.enable_input_metadata)
             {
@@ -2106,6 +2120,22 @@ decode_proc(context_t& ctx, int argc, char *argv[])
     }
 #endif
 
+cleanup:
+    if (ctx.blocking_mode && ctx.dec_capture_loop)
+    {
+        pthread_join(ctx.dec_capture_loop, NULL);
+    }
+    else if (!ctx.blocking_mode)
+    {
+        /* Clear the poll interrupt to get the decoder's poll thread out. */
+        ctx.dec->ClearPollInterrupt();
+        /* If Pollthread is waiting on, signal it to exit the thread. */
+        sem_post(&ctx.pollthread_sema);
+        pthread_join(ctx.dec_pollthread, NULL);
+    }
+
+    cout << "capture_plane total dequeued buffers:" << ctx.dec->capture_plane.getTotalDequeuedBuffers() << endl;
+
     if (ctx.stats)
     {
         profiler.stop();
@@ -2123,19 +2153,6 @@ decode_proc(context_t& ctx, int argc, char *argv[])
         profiler.printProfilerData(cout);
     }
 
-cleanup:
-    if (ctx.blocking_mode && ctx.dec_capture_loop)
-    {
-        pthread_join(ctx.dec_capture_loop, NULL);
-    }
-    else if (!ctx.blocking_mode)
-    {
-        /* Clear the poll interrupt to get the decoder's poll thread out. */
-        ctx.dec->ClearPollInterrupt();
-        /* If Pollthread is waiting on, signal it to exit the thread. */
-        sem_post(&ctx.pollthread_sema);
-        pthread_join(ctx.dec_pollthread, NULL);
-    }
     if(ctx.capture_plane_mem_type == V4L2_MEMORY_DMABUF)
     {
         for(int index = 0 ; index < ctx.numCapBuffers ; index++)
